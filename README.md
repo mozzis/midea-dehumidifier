@@ -23,6 +23,9 @@ The setpoint is drawn as a dotted line with a shaded ±5 band. A line segment ta
 ends at. Readings more than a few poll intervals apart are not joined, so outages show as gaps. Ranges: 6 h, 24 h, 7 d, 30 d.
 Hover for details.
 
+**Side panel.** A small panel on the left shows the latest fan speed (raw value, with Low / Medium / High for 40 / 60 / 80),
+temperature (°F and °C) and tank level (%). It always shows the latest reading, even when the chart is scrolled back.
+
 **Scrolling through time.** *◀ Back* / *Forward ▶* move the window by the step chosen in the dropdown (30 min, 1 h, 6 h, 12 h
 or 24 h). *Now* returns to the live view, and *Forward* past the present does the same. While scrolled back the chart is
 **paused** (the window is fixed, so it stops refreshing) and the toolbar shows the window's start and end; the

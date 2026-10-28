@@ -8,7 +8,12 @@
     :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1d1b; --muted:#6b6a66; --line:#e3e1dc; --grid:#ecebe7; }
     @media (prefers-color-scheme: dark) { :root { --bg:#151514; --card:#1f1f1d; --ink:#ecebe7; --muted:#9a9893; --line:#33322f; --grid:#2a2a28; } }
     body { margin:0; font:16px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
-    main { max-width:1100px; margin:0 auto; padding:20px 16px; }
+    main { max-width:1280px; margin:0 auto; padding:20px 16px; }
+    .layout { display:grid; grid-template-columns:170px minmax(0,1fr); gap:12px; align-items:start; }
+    .side { display:flex; flex-direction:column; gap:18px; margin-bottom:12px; }
+    .side .stat b { font-size:24px; }
+    .side .stat small { display:block; font-size:13px; color:var(--muted); }
+    @media (max-width:760px) { .layout { grid-template-columns:1fr; } .side { flex-direction:row; flex-wrap:wrap; gap:8px 28px; } }
     .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 20px; margin-bottom:12px; }
     .stats { display:flex; flex-wrap:wrap; gap:8px 32px; align-items:baseline; }
     .big { font-size:48px; font-weight:600; letter-spacing:-1px; }
@@ -34,6 +39,13 @@
 </head>
 <body>
 <main>
+  <div class="layout">
+    <aside class="card side" id="side">
+      <div class="stat"><span>Fan speed</span><b id="fan">—</b></div>
+      <div class="stat"><span>Temperature</span><b id="temp">—</b><small id="tempC"></small></div>
+      <div class="stat"><span>Tank level</span><b id="tank">—</b></div>
+    </aside>
+    <div class="content">
   <div class="card stats" id="stats"><span class="muted">Loading…</span></div>
 
   <div class="card">
@@ -68,6 +80,8 @@
       <span><i class="dash" style="border-color:#8884;border-top-width:1px"></i>setpoint (shaded ±5%)</span>
     </div>
   </div>
+    </div>
+  </div>
 </main>
 <script>
 const COLORS = { low: '#d93025', normal: '#1e9e4a', high: '#f4b400' };
@@ -83,20 +97,28 @@ const endMs = () => viewEnd ?? Date.now();
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const fmt = (v, u = '', d = 1) => v == null ? '—' : `${Math.round(v * 10 ** d) / 10 ** d}${u}`;
 
+const FAN_LABELS = { 40: 'Low', 60: 'Medium', 80: 'High' };
+
+function showSide(d) {
+  $('#fan').textContent = d ? `${d.fanSpeed}${FAN_LABELS[d.fanSpeed] ? ' (' + FAN_LABELS[d.fanSpeed] + ')' : ''}` : '—';
+  $('#temp').textContent = d ? fmt(d.temperatureC * 9 / 5 + 32, '°F') : '—';
+  $('#tempC').textContent = d ? fmt(d.temperatureC, '°C') : '';
+  $('#tank').textContent = d ? `${d.tankLevel}%${d.tankFull ? ' (full)' : ''}` : '—';
+}
+
 async function loadStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
-    if (!r.ok) { $('#stats').innerHTML = `<span class="muted err">${d.detail || r.statusText}</span>`; return; }
+    if (!r.ok) { $('#stats').innerHTML = `<span class="muted err">${d.detail || r.statusText}</span>`; showSide(null); return; }
     const color = COLORS[d.band];
+    showSide(d);
     $('#stats').innerHTML = `
       <div class="stat"><span>Humidity</span><b class="big" style="color:${color}">${d.humidity}%</b></div>
       <div class="stat"><span>Setpoint</span><b>${fmt(d.targetHumidity, '%', 0)}</b></div>
       <div class="stat"><span>Unit</span><b>${d.powerOn ? 'On' : 'Off'}</b></div>
-      <div class="stat"><span>Room temp</span><b>${fmt(d.temperatureC * 9 / 5 + 32, '°F')}</b></div>
-      <div class="stat"><span>Tank</span><b>${d.tankFull ? 'Full' : 'OK'}</b></div>
       <div class="stat"><span>Updated</span><b>${new Date(d.timestampUtc).toLocaleTimeString()}</b></div>`;
-  } catch { $('#stats').innerHTML = '<span class="muted err">Backend unreachable</span>'; }
+  } catch { $('#stats').innerHTML = '<span class="muted err">Backend unreachable</span>'; showSide(null); }
 }
 
 async function loadReadings() {

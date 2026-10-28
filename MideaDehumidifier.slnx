@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MideaDehumidifier.Api/MideaDehumidifier.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MideaDehumidifier.Tests/MideaDehumidifier.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dehumidifier humidity</title>
+  <style>
+    :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1d1b; --muted:#6b6a66; --line:#e3e1dc; --grid:#ecebe7; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#151514; --card:#1f1f1d; --ink:#ecebe7; --muted:#9a9893; --line:#33322f; --grid:#2a2a28; } }
+    body { margin:0; font:16px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+    main { max-width:1100px; margin:0 auto; padding:20px 16px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 20px; margin-bottom:12px; }
+    .stats { display:flex; flex-wrap:wrap; gap:8px 32px; align-items:baseline; }
+    .big { font-size:48px; font-weight:600; letter-spacing:-1px; }
+    .stat span { display:block; font-size:13px; color:var(--muted); }
+    .stat b { font-size:20px; font-weight:600; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
+    .toolbar .spacer { flex:1; }
+    button { font:inherit; padding:5px 12px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+    button.active { background:var(--ink); color:var(--card); }
+    #chartWrap { position:relative; height:420px; }
+    canvas { width:100%; height:100%; display:block; }
+    #tip { position:absolute; pointer-events:none; display:none; background:var(--card); border:1px solid var(--line);
+           border-radius:8px; padding:6px 10px; font-size:13px; box-shadow:0 2px 8px #0003; white-space:nowrap; }
+    .legend { display:flex; flex-wrap:wrap; gap:6px 20px; margin-top:10px; font-size:13px; color:var(--muted); }
+    .legend i { display:inline-block; width:26px; height:0; border-top:3px solid; vertical-align:middle; margin-right:6px; }
+    .legend i.dash { border-top-style:dashed; }
+    .muted { color:var(--muted); font-size:14px; }
+    button:disabled { opacity:.45; cursor:default; }
+    select { font:inherit; padding:5px 8px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+    .paused { color:#f4b400; font-weight:600; }
+    .err { color:#d93025; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="card stats" id="stats"><span class="muted">Loading…</span></div>
+
+  <div class="card">
+    <div class="toolbar">
+      <button data-hours="6">6 h</button>
+      <button data-hours="24">24 h</button>
+      <button data-hours="168">7 d</button>
+      <button data-hours="720">30 d</button>
+      <span class="spacer"></span>
+      <span class="muted" id="meta"></span>
+    </div>
+    <div class="toolbar">
+      <button id="back" title="Scroll back in time">◀ Back</button>
+      <select id="step" title="Scroll step">
+        <option value="30">30 min</option>
+        <option value="60">1 hour</option>
+        <option value="360">6 hours</option>
+        <option value="720">12 hours</option>
+        <option value="1440">24 hours</option>
+      </select>
+      <button id="fwd" title="Scroll forward in time">Forward ▶</button>
+      <button id="now" title="Return to the live view">Now</button>
+      <span class="muted" id="mode"></span>
+    </div>
+    <div id="chartWrap"><canvas id="chart"></canvas><div id="tip"></div></div>
+    <div class="legend">
+      <span><i style="border-color:#d93025"></i>&gt; 5% below setpoint</span>
+      <span><i style="border-color:#1e9e4a"></i>within ±5% of setpoint</span>
+      <span><i style="border-color:#f4b400"></i>&gt; 5% above setpoint</span>
+      <span><i style="border-color:#888"></i>solid: unit on</span>
+      <span><i class="dash" style="border-color:#888"></i>dashed: unit off</span>
+      <span><i class="dash" style="border-color:#8884;border-top-width:1px"></i>setpoint (shaded ±5%)</span>
+    </div>
+  </div>
+</main>
+<script>
+const COLORS = { low: '#d93025', normal: '#1e9e4a', high: '#f4b400' };
+const $ = s => document.querySelector(s);
+const canvas = $('#chart'), ctx = canvas.getContext('2d'), tip = $('#tip');
+let hours = Number(localStorage.getItem('hours')) || 24;
+let stepMin = Number(localStorage.getItem('stepMin')) || 60;
+let viewEnd = null;       // ms timestamp of the right edge; null = live (follows the current time)
+let data = [];            // [{t:Date ms, ...reading}]
+let plot = null;          // layout of the last draw, used by the tooltip
+const endMs = () => viewEnd ?? Date.now();
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = (v, u = '', d = 1) => v == null ? '—' : `${Math.round(v * 10 ** d) / 10 ** d}${u}`;
+
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    if (!r.ok) { $('#stats').innerHTML = `<span class="muted err">${d.detail || r.statusText}</span>`; return; }
+    const color = COLORS[d.band];
+    $('#stats').innerHTML = `
+      <div class="stat"><span>Humidity</span><b class="big" style="color:${color}">${d.humidity}%</b></div>
+      <div class="stat"><span>Setpoint</span><b>${fmt(d.targetHumidity, '%', 0)}</b></div>
+      <div class="stat"><span>Unit</span><b>${d.powerOn ? 'On' : 'Off'}</b></div>
+      <div class="stat"><span>Room temp</span><b>${fmt(d.temperatureC * 9 / 5 + 32, '°F')}</b></div>
+      <div class="stat"><span>Tank</span><b>${d.tankFull ? 'Full' : 'OK'}</b></div>
+      <div class="stat"><span>Updated</span><b>${new Date(d.timestampUtc).toLocaleTimeString()}</b></div>`;
+  } catch { $('#stats').innerHTML = '<span class="muted err">Backend unreachable</span>'; }
+}
+
+async function loadReadings() {
+  const end = endMs(), start = end - hours * 3600e3;
+  try {
+    const r = await fetch(`/api/readings?from=${new Date(start).toISOString()}&to=${new Date(end).toISOString()}`);
+    const d = await r.json();
+    if (!r.ok) { $('#meta').textContent = d.detail || r.statusText; return; }
+    // Ignore a response for a window the user has already moved away from.
+    if (end !== endMs() && viewEnd !== null) return;
+    data = d.readings.map(x => ({ ...x, t: Date.parse(x.timestampUtc) }));
+    $('#meta').textContent = `${d.totalCount} readings`;
+  } catch { $('#meta').textContent = 'Backend unreachable'; }
+  draw();
+}
+
+const span = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+function updateControls() {
+  $('#fwd').disabled = $('#now').disabled = viewEnd === null;
+  $('#mode').innerHTML = viewEnd === null ? 'Live'
+    : `<span class="paused">Paused</span> · ${span.format(viewEnd - hours * 3600e3)} – ${span.format(viewEnd)}`;
+  $('#step').value = String(stepMin);
+}
+
+function shift(minutes) {
+  const target = endMs() + minutes * 60e3;
+  viewEnd = target >= Date.now() ? null : target;
+  updateControls(); loadReadings();
+}
+
+function niceStep(span, target) {
+  const raw = span / target, mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map(m => m * mag).find(s => s >= raw) ?? raw;
+}
+
+function timeTicks(t0, t1, maxTicks) {
+  const steps = [1, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080].map(m => m * 60000);
+  const step = steps.find(s => (t1 - t0) / s <= maxTicks) ?? steps.at(-1);
+  const ticks = [];
+  const offset = new Date(t0).getTimezoneOffset() * 60000;
+  for (let t = Math.ceil((t0 - offset) / step) * step + offset; t <= t1; t += step) ticks.push(t);
+  return { ticks, step };
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const m = { l: 46, r: 14, t: 10, b: 30 };
+  const pw = w - m.l - m.r, ph = h - m.t - m.b;
+  const ink = css('--muted'), grid = css('--grid');
+  ctx.font = '12px system-ui, sans-serif';
+
+  const t1 = endMs(), t0 = t1 - hours * 3600e3;
+  const vals = data.flatMap(d => [d.humidity, d.targetHumidity - 5, d.targetHumidity + 5]);
+  let lo = vals.length ? Math.min(...vals) : 30, hi = vals.length ? Math.max(...vals) : 70;
+  lo = Math.max(0, Math.floor((lo - 2) / 5) * 5); hi = Math.min(100, Math.ceil((hi + 2) / 5) * 5);
+  const X = t => m.l + (t - t0) / (t1 - t0) * pw;
+  const Y = v => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  plot = { X, Y, m, w, h, t0, t1 };
+
+  // grid + axes
+  ctx.strokeStyle = grid; ctx.fillStyle = ink; ctx.lineWidth = 1; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  const vs = niceStep(hi - lo, 6);
+  for (let v = Math.ceil(lo / vs) * vs; v <= hi; v += vs) {
+    ctx.beginPath(); ctx.moveTo(m.l, Y(v) + .5); ctx.lineTo(w - m.r, Y(v) + .5); ctx.stroke();
+    ctx.fillText(v + '%', m.l - 6, Y(v));
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const { ticks, step } = timeTicks(t0, t1, Math.max(2, Math.floor(pw / 90)));
+  for (const t of ticks) {
+    ctx.beginPath(); ctx.moveTo(X(t) + .5, m.t); ctx.lineTo(X(t) + .5, m.t + ph); ctx.stroke();
+    const d = new Date(t);
+    ctx.fillText(step >= 1440 * 60000 ? d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }), X(t), m.t + ph + 8);
+  }
+  if (!data.length) { ctx.fillStyle = ink; ctx.textAlign = 'center'; ctx.fillText('No readings in this range', w / 2, h / 2); return; }
+
+  // Readings further apart than this are not joined (the backend or device was unreachable).
+  const gaps = data.slice(1).map((d, i) => d.t - data[i].t).sort((a, b) => a - b);
+  const maxGap = Math.max(5 * 60e3, 3 * (gaps[Math.floor(gaps.length / 2)] ?? 0));
+  const groups = [[data[0]]];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i].t - data[i - 1].t > maxGap) groups.push([data[i]]); else groups.at(-1).push(data[i]);
+  }
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(m.l, m.t, pw, ph); ctx.clip();
+
+  // setpoint with ±5% band
+  for (const g of groups) {
+    if (g.length < 2) continue;
+    ctx.beginPath();
+    g.forEach((d, i) => ctx[i ? 'lineTo' : 'moveTo'](X(d.t), Y(d.targetHumidity + 5)));
+    for (let i = g.length - 1; i >= 0; i--) ctx.lineTo(X(g[i].t), Y(g[i].targetHumidity - 5));
+    ctx.closePath(); ctx.fillStyle = '#1e9e4a1f'; ctx.fill();
+    ctx.beginPath();
+    g.forEach((d, i) => ctx[i ? 'lineTo' : 'moveTo'](X(d.t), Y(d.targetHumidity)));
+    ctx.strokeStyle = '#8888'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]); ctx.stroke();
+  }
+
+  // Humidity line. A run of segments with the same colour and dash is stroked as one path so the
+  // dash pattern stays continuous; a segment takes the style of the reading it ends at.
+  ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.lineCap = 'butt';
+  for (const g of groups) {
+    if (g.length === 1) {
+      ctx.fillStyle = COLORS[g[0].band]; ctx.beginPath(); ctx.arc(X(g[0].t), Y(g[0].humidity), 2.5, 0, 7); ctx.fill();
+      continue;
+    }
+    let start = 0;
+    const same = (a, b) => a.band === b.band && a.powerOn === b.powerOn;
+    for (let i = 1; i <= g.length; i++) {
+      if (i < g.length && same(g[i], g[start + 1])) continue;
+      const style = g[start + 1];
+      ctx.beginPath();
+      for (let j = start; j < i; j++) ctx[j === start ? 'moveTo' : 'lineTo'](X(g[j].t), Y(g[j].humidity));
+      ctx.strokeStyle = COLORS[style.band];
+      ctx.setLineDash(style.powerOn ? [] : [8, 6]);
+      ctx.stroke();
+      start = i - 1;
+    }
+  }
+  ctx.restore();
+  ctx.setLineDash([]);
+}
+
+canvas.addEventListener('mousemove', e => {
+  if (!plot || !data.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const t = plot.t0 + (x - plot.m.l) / (plot.w - plot.m.l - plot.m.r) * (plot.t1 - plot.t0);
+  let a = 0, b = data.length - 1;
+  while (a < b) { const mid = (a + b) >> 1; data[mid].t < t ? a = mid + 1 : b = mid; }
+  const d = (a > 0 && t - data[a - 1].t < data[a].t - t) ? data[a - 1] : data[a];
+  if (Math.abs(plot.X(d.t) - x) > 30) { tip.style.display = 'none'; return; }
+  const band = { low: 'below band', normal: 'in band', high: 'above band' }[d.band];
+  tip.innerHTML = `<b style="color:${COLORS[d.band]}">${d.humidity}%</b> (${band}) · setpoint ${fmt(d.targetHumidity, '%', 0)}<br>` +
+    `${d.powerOn ? 'On' : 'Off'} · ${fmt(d.temperatureC * 9 / 5 + 32, '°F')}<br>${new Date(d.t).toLocaleString()}`;
+  tip.style.display = 'block';
+  tip.style.left = Math.min(plot.X(d.t) + 12, plot.w - tip.offsetWidth - 4) + 'px';
+  tip.style.top = Math.max(0, plot.Y(d.humidity) - tip.offsetHeight - 12) + 'px';
+});
+canvas.addEventListener('mouseleave', () => tip.style.display = 'none');
+
+document.querySelectorAll('[data-hours]').forEach(b => b.addEventListener('click', () => {
+  hours = Number(b.dataset.hours); localStorage.setItem('hours', hours); markActive(); updateControls(); loadReadings();
+}));
+$('#back').addEventListener('click', () => shift(-stepMin));
+$('#fwd').addEventListener('click', () => shift(stepMin));
+$('#now').addEventListener('click', () => { viewEnd = null; updateControls(); loadReadings(); });
+$('#step').addEventListener('change', e => { stepMin = Number(e.target.value); localStorage.setItem('stepMin', stepMin); });
+function markActive() { document.querySelectorAll('[data-hours]').forEach(b => b.classList.toggle('active', Number(b.dataset.hours) === hours)); }
+window.addEventListener('resize', draw);
+
+markActive(); updateControls();
+loadStatus(); loadReadings();
+// Scrolled back in time the chart is paused: the window is fixed, so there is nothing new to fetch.
+setInterval(() => { loadStatus(); if (viewEnd === null) loadReadings(); }, 60000);
+</script>
+</body>
+</html>
